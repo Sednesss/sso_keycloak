@@ -1,30 +1,129 @@
-version: '3.8'
+volumes:
+  keycloak-postgres:
+  keycloak-postgres-backup:
+  keycloak-database-backups:
 
 services:
-  keycloak_web:
-    image: quay.io/keycloak/keycloak:24.0.3
-    container_name: 78.24.220.32
-    environment:
-      KC_HOSTNAME: localhost
-      KC_HOSTNAME_PORT: 8080
-      KC_HOSTNAME_STRICT: false
-      KC_HOSTNAME_STRICT_HTTPS: false
-
-      KC_LOG_LEVEL: info
-      KC_METRICS_ENABLED: true
-      KC_HEALTH_ENABLED: true
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
-    command: start-dev
-    ports:
-      - 8080:8080
-  nginx:
-    image: nginx:latest
-    container_name: nginx
-    ports:
-      - 80:80
-      - 443:443
+  postgres:
+    image: ${KEYCLOAK_POSTGRES_IMAGE_TAG}
+    container_name: postgres
     volumes:
-      - ._docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - keycloak-postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${KEYCLOAK_DB_NAME}
+      POSTGRES_USER: ${KEYCLOAK_DB_USER}
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+    networks:
+      - keycloak
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-q", "-d", "${KEYCLOAK_DB_NAME}", "-U", "${KEYCLOAK_DB_USER}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  keycloak:
+    image: ${KEYCLOAK_IMAGE_TAG}
+    container_name: keycloak
+    volumes:
+      - ./deploy/keycloak/http-store-file:/etc/keycloak/http-file-store
+
+      ## try tls
+      # - ./opt/bitnami/keycloak/certs:/opt/bitnami/keycloak/certs
+
+      ## try ssl
+      - ./regru-ssl:/opt/bitnami/keycloak/certs
+    environment:
+      KEYCLOAK_PRODUCTION: true
+      KEYCLOAK_DATABASE_VENDOR: ${KEYCLOAK_DB_TYPE}
+      KEYCLOAK_DATABASE_HOST: postgres
+      KEYCLOAK_DATABASE_PORT: 5432
+      KEYCLOAK_DATABASE_NAME: ${KEYCLOAK_DB_NAME}
+      KEYCLOAK_DATABASE_USER: ${KEYCLOAK_DB_USER}
+      KEYCLOAK_DATABASE_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KEYCLOAK_DATABASE_SCHEMA: public
+      KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USERNAME}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KEYCLOAK_HOSTNAME: ${KEYCLOAK_HOSTNAME}
+      KEYCLOAK_ENABLE_STATISTICS: true
+
+      KEYCLOAK_ENABLE_HTTPS: true
+      KEYCLOAK_HTTPS_KEY_STORE_FILE: ${KEYCLOAK_HTTPS_KEY_STORE_FILE}
+      KEYCLOAK_HTTPS_TRUST_STORE_FILE: ${KEYCLOAK_HTTPS_TRUST_STORE_FILE}
+      KEYCLOAK_HTTPS_KEY_STORE_PASSWORD: 123456
+      KEYCLOAK_HTTPS_TRUST_STORE_PASSWORD: 123456
+
+      KEYCLOAK_HTTPS_USE_PEM: true
+      KEYCLOAK_HTTPS_CERTIFICATE_FILE: ${KEYCLOAK_HTTPS_CERTIFICATE_FILE}
+      KEYCLOAK_HTTPS_CERTIFICATE_KEY_FILE: ${KEYCLOAK_HTTPS_CERTIFICATE_KEY_FILE}
+    networks:
+      - keycloak
+    ports:
+      - "80:8080"
+      - "443:8443"
+    healthcheck:
+      test: timeout 10s bash -c ':> /dev/tcp/127.0.0.1/8080' || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
     depends_on:
-      - keycloak_web
+      postgres:
+        condition: service_healthy
+
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: nginx
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./:/var/www/html
+  #     - ./deploy/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf
+  #     - ./certbot/conf:/etc/nginx/ssl
+  #     - ./certbot/data:/var/www/certbot:ro
+  #   ports:
+  #     - "80:80"
+  #   networks:
+  #     - keycloak
+    
+  certbot:
+    image: certbot/certbot:latest
+    container_name: certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt:rw
+      - ./certbot/logs:/var/log/letsencrypt
+      - ./certbot/data:/var/www/certbot:rw
+    command: certonly --webroot --webroot-path=/var/www/certbot --force-renewal --email ${EMAIL} -d ${KEYCLOAK_HOSTNAME} --agree-tos
+
+  backups:
+    image: ${KEYCLOAK_POSTGRES_IMAGE_TAG}
+    container_name: backups
+    command: >-
+      sh -c 'sleep $KEYCLOAK_BACKUP_INIT_SLEEP &&
+      while true; do
+        pg_dump -h postgres -p 5432 -d $KEYCLOAK_DB_NAME -U $KEYCLOAK_DB_USER | gzip > $KEYCLOAK_POSTGRES_BACKUPS_PATH/$KEYCLOAK_POSTGRES_BACKUP_NAME-$(date "+%Y-%m-%d_%H-%M").gz &&
+        find $KEYCLOAK_POSTGRES_BACKUPS_PATH -type f -mtime +$KEYCLOAK_POSTGRES_BACKUP_PRUNE_DAYS | xargs rm -f &&
+        sleep $KEYCLOAK_BACKUP_INTERVAL; done'
+    volumes:
+      - keycloak-postgres-backup:/var/lib/postgresql/data
+      - keycloak-database-backups:${KEYCLOAK_POSTGRES_BACKUPS_PATH}
+    environment:
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER}
+      PGPASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KEYCLOAK_BACKUP_INIT_SLEEP: ${KEYCLOAK_BACKUP_INIT_SLEEP}
+      KEYCLOAK_BACKUP_INTERVAL: ${KEYCLOAK_BACKUP_INTERVAL}
+      KEYCLOAK_POSTGRES_BACKUP_PRUNE_DAYS: ${KEYCLOAK_POSTGRES_BACKUP_PRUNE_DAYS}
+      KEYCLOAK_POSTGRES_BACKUPS_PATH: ${KEYCLOAK_POSTGRES_BACKUPS_PATH}
+      KEYCLOAK_POSTGRES_BACKUP_NAME: ${KEYCLOAK_POSTGRES_BACKUP_NAME}
+    networks:
+      - keycloak
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  keycloak:
+    driver: bridge
