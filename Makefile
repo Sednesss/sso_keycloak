@@ -9,3 +9,7 @@ ssh-create:
   # ssl
   # keytool -genkey -alias "./regru-ssl/keystore.jks" -keyalg RSA -keystore ./regru-ssl/keystore.jks -keysize 2048
   # keytool -genkey -alias truststore -keyalg RSA -keystore ./regru-ssl/truststore.jks -keysize 2048
+
+keycloak-logs-clear:
+  docker inspect --format='{{.LogPath}}' keycloak
+  sudo sh -c 'echo "" > $(docker inspect --format="{{.LogPath}}" keycloak)'
